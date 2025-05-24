@@ -1,4 +1,5 @@
 import requests
+import time
 from config import db, cursor
 
 def sync_bill_status_link():
@@ -35,4 +36,6 @@ def sync_bill_status_link():
 
 
 if __name__ == "__main__":
-    sync_bill_status_link()
+    while True:
+        sync_bill_status_link()
+        time.sleep(10800)
