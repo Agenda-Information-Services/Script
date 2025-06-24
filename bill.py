@@ -3,7 +3,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 import openai
-from config import db, cursor, client, API_URL
+from config import db, cursor, client, API_URL, RECOMMEND_API_URL
 
 
 EMBED_MODEL = "text-embedding-3-small"
@@ -45,10 +45,14 @@ def summarize_text(text: str):
     try:
         # 요약
         summary_prompt = (
-            "당신은 법률 전문가입니다. 아래 법안 내용을 일반 시민이 쉽게 이해할 수 있도록 간결하게 요약하세요.\n"
-            "다음 형식을 따라 작성해주세요:\n\n"
-            "[주요 내용 요약]\n내용을 간결하고 명확하게 작성해주세요.\n\n"
-            "[제정 목적]\n이 법안이 왜 만들어졌는지를 설명해주세요."
+            "당신은 법률 전문가입니다. 아래 법안 내용을 법률 지식이 없는 일반 시민도 이해할 수 있도록 명확하게 설명하십시오.\n"
+            "다음 JSON 형식을 엄격하게 지켜서 응답하십시오:\n\n"
+            "{\n"
+            '  "summary": "법안의 핵심 내용을 간결하고 명확하게 설명",\n'
+            '  "purpose": "이 법안이 제정된 배경 또는 필요성을 명확하게 설명"\n'
+            "}\n\n"
+            "JSON 외의 다른 말머리나 형식은 절대 포함하지 마십시오.\n"
+            "법안 내용은 다음과 같습니다:"
         )
         summary_response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -63,10 +67,27 @@ def summarize_text(text: str):
 
         # 영향 예측
         prediction_prompt = (
-            "당신은 정책 분석가입니다. 아래 법안이 통과될 경우 어떤 영향이 있을지 분석하세요.\n"
-            "다음 형식을 따라 작성해주세요:\n\n"
-            "[긍정적 영향]\n1. ...\n2. ...\n\n"
-            "[부정적 영향]\n1. ...\n2. ..."
+            "당신은 정책 분석 전문가입니다. 아래 법안이 시행될 경우 예상되는 사회적, 행정적, 경제적 영향을 분석하세요. "
+            "긍정적인 영향과 부정적인 영향을 각각 제목과 상세 설명으로 구성하여 구체적으로 작성하십시오.\n\n"
+            "다음 JSON 형식에 정확히 맞추어 응답하십시오:\n\n"
+            "{\n"
+            '  "positive_effects": [\n'
+            '    {\n'
+            '      "title": "긍정적 영향의 제목",\n'
+            '      "description": "그 영향이 발생하는 이유와 맥락을 설명하는 문단"\n'
+            '    },\n'
+            '    ...\n'
+            '  ],\n'
+            '  "negative_effects": [\n'
+            '    {\n'
+            '      "title": "부정적 영향의 제목",\n'
+            '      "description": "그 영향이 발생할 수 있는 이유나 우려를 설명하는 문단"\n'
+            '    },\n'
+            '    ...\n'
+            '  ]\n'
+            "}\n\n"
+            "형식 외의 다른 설명은 포함하지 말고, 반드시 위 JSON 구조를 그대로 따르십시오.\n"
+            "법안 내용은 다음과 같습니다:"
         )
         prediction_response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -81,10 +102,17 @@ def summarize_text(text: str):
 
         # 법률 용어 설명
         term_prompt = (
-            "당신은 법률 교육자입니다. 아래 법안 내용 중 일반인이 이해하기 어려울 법률 용어 3개를 선택하고, "
-            "각각에 대해 한 문장으로 쉽게 설명해 주세요.\n"
-            "다음 형식을 따라 주세요:\n\n"
-            "1. 용어: 설명\n2. 용어: 설명\n3. 용어: 설명"
+            "당신은 법률 교육 전문가입니다. 아래 법안 내용 중 일반인이 이해하기 어려울 수 있는 법률 또는 행정 용어를 선별하고, "
+            "각 용어를 한 문장으로 알기 쉽게 설명하십시오.\n\n"
+            "다음 JSON 형식을 정확히 따르십시오:\n\n"
+            "{\n"
+            '  "terms": [\n'
+            '    {"term": "어려운 용어1", "description": "쉬운 설명1"},\n'
+            '    {"term": "어려운 용어2", "description": "쉬운 설명2"}\n'
+            "  ]\n"
+            "}\n\n"
+            "JSON 외의 다른 말머리나 문장은 포함하지 마십시오.\n"
+            "법안 내용은 다음과 같습니다:"
         )
         term_response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -126,13 +154,15 @@ def save_to_db(apiId, billNumber, billTitle, billProposer,
     exists = cursor.fetchone()
 
     if exists:
-        print(f"[기존] {apiId} - 상태/일자만 업데이트")
+        print(f"[기존] {apiId} - 상태/일자/위원회 업데이트")
         cursor.execute("""
             UPDATE Bill
             SET billStatus = %s,
-                billDate   = %s
+                billDate   = %s,
+                committee  = %s
             WHERE apiId = %s
-        """, (billStatus, billDate, apiId))
+        """, (billStatus, billDate, committee, apiId))
+
     else:
         print(f"[신규] {apiId} - GPT 처리 및 INSERT")
         cursor.execute("""
@@ -158,7 +188,8 @@ def process_rows(law_list):
         apiId = law.get("BILL_ID", "")
         billNumber = law.get("BILL_NO", "")
         billTitle = law.get("BILL_NAME", "").strip()
-        billProposer = law.get("PROPOSER", "").split(" ")[0].replace("의원", "").strip()
+        raw_proposer = law.get("PROPOSER", "")
+        billProposer = raw_proposer.split(" ")[0].split("ㆍ")[0].replace("의원", "").strip()
 
         DEFAULT_PROPOSER_NAME = "기타"
 
@@ -192,27 +223,45 @@ def process_rows(law_list):
         exists = cursor.fetchone()
 
         if exists:
-            print(" → 기존 항목: 상태/일자만 갱신")
+            print(" → 기존 항목: 상태/일자/위원회 갱신")
             save_to_db(apiId, billNumber, billTitle, billProposer, proposerId,
-                       committee, billStatus, billDate,
-                       None, None, None, None, None)
+                    committee, billStatus, billDate,
+                    None, None, None, None, None)
+
         else:
-            print(" → 신규 항목: GPT 요약 및 벡터 생성")
             detail = scrape_law_details(law.get("DETAIL_LINK", ""))
+            if detail in ["내용 없음", "크롤링 실패", "크롤링 오류"]:
+                print(" → 상세 내용 없음/크롤링 오류: 건너뜀")
+                continue
+
+            print(" → 신규 항목: GPT 요약 및 벡터 생성")
             summary, prediction, term = summarize_text(detail)
             combined = f"{billTitle}\n{billTitle}\n{billTitle}\n{summary}\n{detail}"
             embedding_literal = generate_embedding(combined)
 
             save_to_db(apiId, billNumber, billTitle, billProposer, proposerId,
-                       committee, billStatus, billDate,
-                       detail, summary, prediction, term, embedding_literal)
+                    committee, billStatus, billDate,
+                    detail, summary, prediction, term, embedding_literal)
+
+
+def refresh_embedding_cache():
+    try:
+        response = requests.post(RECOMMEND_API_URL, timeout=10)
+        if response.status_code == 200:
+            print("캐시 갱신 성공:", response.text)
+        else:
+            print("캐시 갱신 실패:", response.status_code, response.text)
+    except Exception as e:
+        print("캐시 갱신 요청 오류:", e)
 
 
 def initial_data_load():
-    process_rows(fetch_law_data(size=200))
+    process_rows(fetch_law_data(size=300))
+    # refresh_embedding_cache() 
 
 def update_latest_laws():
-    process_rows(fetch_law_data(size=10))
+    process_rows(fetch_law_data(size=30))
+    # refresh_embedding_cache()
 
 
 
